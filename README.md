@@ -8,7 +8,11 @@ A simple plugin to debug individual google tests with nvim.dap
 ```lua
 {
 	'ofwinterpassed/gtestrunner.nvim',
-	depencencies = { 'nvim-dap/nvim-dap',  },
+    depencencies = {
+        'mfussenegger/nvim-dap',
+        'nvim-telescope/telescope.nvim',
+        'nvim-treesitter/nvim-treesitter'
+    },
     -- for using default values: config = true
     -- the values below matches the default
 	config = {
