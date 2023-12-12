@@ -15,7 +15,7 @@ A simple plugin to debug individual google tests with nvim.dap
     },
     -- for using default values: config = true
     -- the values below matches the default
-	config = {
+	opts = {
 		bin_path = './build',
 		default_executable = 'a.out',
 		base_dap_config = {
