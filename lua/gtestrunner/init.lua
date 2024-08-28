@@ -50,20 +50,27 @@ M.run_gtest_under_cursor = function()
 	local buf = vim.api.nvim_get_current_buf()
 	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
 
-	for _, captures, _ in query:iter_matches(root, buf, root:start(), root:end_()) do
-		if vim.treesitter.is_in_node_range(captures[4], row - 1, col) then
-			local param = '--gtest_filter=*' .. vim.treesitter.get_node_text(captures[2], buf) ..
-			    '.' .. vim.treesitter.get_node_text(captures[3], buf) .. '*'
-			local config = M.base_dap_config
-			config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
-			config.program = M.current_executable
-			config.args = { param }
-			print(config.program .. ' ' .. param)
-			require('dap').run(config)
-			return
+	for _, captures, _, _ in query:iter_matches(root, buf, root:start(), root:end_(), {all=true}) do
+		for _, tfnode in ipairs(captures[4]) do
+			if vim.treesitter.is_in_node_range(tfnode, row - 1, col) then
+				local param = '--gtest_filter=*'
+				for _, node in ipairs(captures[2]) do
+					param = param .. vim.treesitter.get_node_text(node, buf) .. '.'
+				end
+				for _, node in ipairs(captures[3]) do
+					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
+				end
+				local config = M.base_dap_config
+				config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
+				config.program = M.current_executable
+				config.args = { param }
+				print(config.program .. ' ' .. param)
+				require('dap').run(config)
+				return
+			end
 		end
 	end
-	print('Not in a test')
+	--print('Not in a test')
 end
 
 M.run_gtestsuite_under_cursor = function()
@@ -77,16 +84,21 @@ M.run_gtestsuite_under_cursor = function()
 	local buf = vim.api.nvim_get_current_buf()
 	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
 
-	for _, captures, _ in query:iter_matches(root, buf, root:start(), root:end_()) do
-		if vim.treesitter.is_in_node_range(captures[4], row - 1, col) then
-			local param = '--gtest_filter=*' .. vim.treesitter.get_node_text(captures[2], buf) .. '*'
-			local config = M.base_dap_config
-			config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
-			config.program = M.current_executable
-			config.args = { param }
-			print(config.program .. ' ' .. param)
-			require('dap').run(config)
-			return
+	for _, captures, _, _ in query:iter_matches(root, buf, root:start(), root:end_(), {all=true}) do
+		for _, tfnode in ipairs(captures[4]) do
+			if vim.treesitter.is_in_node_range(tfnode, row - 1, col) then
+				local param = '--gtest_filter=*'
+				for _, node in ipairs(captures[2]) do
+					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
+				end
+				local config = M.base_dap_config
+				config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
+				config.program = M.current_executable
+				config.args = { param }
+				print(config.program .. ' ' .. param)
+				require('dap').run(config)
+				return
+			end
 		end
 	end
 	print('Not in a test')
@@ -112,6 +124,5 @@ M.set_debug_executable = function()
 			return true
 		end, }
 end
-
 
 return M
