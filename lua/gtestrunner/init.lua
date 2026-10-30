@@ -1,7 +1,7 @@
 local M = {}
 
 M.setup = function(opts)
-	for key, value in pairs(opts) do
+	for key, value in pairs(opts or {}) do
 		M[key] = value
 	end
 	M.current_executable = M.bin_path .. '/' .. M.default_executable
@@ -32,6 +32,8 @@ M.base_dap_config = {
 	stopAtEntry = false,
 	MIMode = 'gdb',
 }
+
+M.picker = 'mini'
 
 M.bin_path = './build'
 
@@ -104,7 +106,41 @@ M.run_gtestsuite_under_cursor = function()
 	print('Not in a test')
 end
 
-M.set_debug_executable = function()
+local set_executable = function(path)
+	print(path)
+	M.current_executable = M.bin_path .. '/' .. path
+end
+
+local pickers = {}
+
+pickers.mini = function()
+	require('mini.pick').builtin.cli({ command = { 'fd', '--type', 'x' } }, {
+		source = {
+			name = 'Set executable',
+			cwd = M.bin_path,
+			choose = function(item)
+				set_executable(item)
+			end,
+		},
+	})
+end
+
+pickers.snacks = function()
+	require('snacks').picker.files({
+		title = 'Set executable',
+		cwd = M.bin_path,
+		cmd = 'fd',
+		args = { '--type', 'x' },
+		confirm = function(picker, item)
+			picker:close()
+			if item then
+				set_executable(item.file)
+			end
+		end,
+	})
+end
+
+pickers.telescope = function()
 	local actions = require('telescope.actions')
 	local action_state = require('telescope.actions.state')
 
@@ -118,11 +154,20 @@ M.set_debug_executable = function()
 			actions.select_default:replace(function()
 				actions.close(prompt_bufnr)
 				local selection = action_state.get_selected_entry()
-				print(selection[1])
-				M.current_executable = M.bin_path .. '/' .. selection[1]
+				set_executable(selection[1])
 			end)
 			return true
 		end, }
+end
+
+M.set_debug_executable = function()
+	local picker = pickers[M.picker]
+	if picker == nil then
+		vim.notify('gtestrunner: unknown picker "' .. tostring(M.picker) .. '", expected mini, snacks or telescope',
+			vim.log.levels.ERROR)
+		return
+	end
+	picker()
 end
 
 return M
