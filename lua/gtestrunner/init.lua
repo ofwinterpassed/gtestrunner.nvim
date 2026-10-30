@@ -3,6 +3,7 @@ local results = require('gtestrunner.results')
 local runner = require('gtestrunner.runner')
 local marks = require('gtestrunner.marks')
 local panel = require('gtestrunner.panel')
+local output = require('gtestrunner.output')
 
 local M = {}
 
@@ -29,6 +30,8 @@ M.panel = {
 	auto_open = true,
 	width = 50,
 	max_failure_lines = 10,
+	-- show the build output in the lower half of the panel while building
+	show_build_output = true,
 }
 
 M.signs = true
@@ -54,6 +57,8 @@ M.icons = {
 	passed = '✓',
 	failed = '✗',
 	skipped = '⊘',
+	-- added to the icon of tests that were run with an older build of the executable
+	stale = '*',
 }
 
 -- options that are merged with the defaults instead of replacing them
@@ -87,21 +92,34 @@ M.tests_for = function(buf)
 	return state and state.tests or {}
 end
 
+local render_marks = function(buf)
+	local state = buffers[buf]
+	if state ~= nil then
+		marks.render(buf, state.tests, M, results.build_id(M.executable_for(buf)))
+	end
+end
+
 local render_all = function()
-	for buf, state in pairs(buffers) do
-		marks.render(buf, state.tests, M)
+	for buf in pairs(buffers) do
+		render_marks(buf)
 	end
 	panel.render()
 end
 
 results.on_change(render_all)
+-- progress and elapsed time in the panel
+output.on_change(panel.render)
 
 local on_enter = function(buf)
 	if #M.tests_for(buf) == 0 then
 		return
 	end
+	-- the executable can have been rebuilt outside of nvim
+	render_marks(buf)
 	if panel.source() ~= buf then
 		panel.set_source(buf)
+	else
+		panel.render()
 	end
 	if M.panel.auto_open and not panel.is_open() and not panel.closed_by_user then
 		panel.open()
@@ -114,7 +132,7 @@ local refresh = function(buf)
 		return
 	end
 	state.tests = discover.tests(buf)
-	marks.render(buf, state.tests, M)
+	render_marks(buf)
 	if panel.source() == buf then
 		panel.render()
 	end
@@ -167,6 +185,7 @@ local define_highlights = function()
 		GtestrunnerTitle = 'Title',
 		GtestrunnerSuite = 'Identifier',
 		GtestrunnerFailureText = 'DiagnosticVirtualTextError',
+		GtestrunnerStale = 'Comment',
 	}
 	for group, link in pairs(links) do
 		vim.api.nvim_set_hl(0, group, { link = link, default = true })
@@ -241,6 +260,7 @@ local launch = function(executable, filter, ids, debug)
 	local request = {
 		-- absolute, the tests may run in another directory than the current one
 		executable = vim.fn.fnamemodify(executable, ':p'),
+		build_id = results.build_id(executable),
 		filter = filter,
 		ids = ids,
 	}
@@ -259,7 +279,7 @@ local start = function(filter, ids, debug, buf)
 		return
 	end
 	local executable = M.executable_for(buf)
-	runner.output = {}
+	output.clear()
 	if M.build == nil then
 		launch(executable, filter, ids, debug)
 		return
@@ -269,14 +289,16 @@ local start = function(filter, ids, debug, buf)
 		vim.cmd('silent! wall')
 	end
 	results.set_status(ids, 'building')
+	output.set_phase('building')
+	if M.panel.show_build_output then
+		panel.show_output()
+	end
 	local state = { ids = ids }
 	build_state = state
 	local request = {
 		executable = executable,
 		buf = buf,
-		output = function(lines)
-			vim.list_extend(runner.output, lines)
-		end,
+		output = output.append,
 	}
 	local cancel = M.build(request, function(ok)
 		vim.schedule(function()
@@ -285,10 +307,13 @@ local start = function(filter, ids, debug, buf)
 				return
 			end
 			build_state = nil
+			output.set_phase(nil)
 			if ok then
+				panel.hide_output()
 				-- resolved again, the build can create or move the executable
 				launch(M.executable_for(buf), filter, ids, debug)
 			else
+				-- the output stays in the panel to show what failed
 				results.set_status(ids, 'unknown')
 				vim.notify('gtestrunner: building the tests failed, see show_output()', vim.log.levels.ERROR)
 			end
@@ -365,7 +390,8 @@ M.cancel = function()
 		if state.cancel then
 			state.cancel()
 		end
-		table.insert(runner.output, 'Build cancelled')
+		output.append({ '', 'Build cancelled' })
+		output.set_phase(nil)
 		results.set_status(state.ids, 'unknown')
 	end
 	runner.cancel()
@@ -376,36 +402,8 @@ M.open_panel = panel.open
 M.close_panel = panel.close
 M.toggle_panel = panel.toggle
 
-local output_buf = nil
-
--- Shows the output of the latest run without the debugger in a split
-M.show_output = function()
-	if output_buf == nil or not vim.api.nvim_buf_is_valid(output_buf) then
-		output_buf = vim.api.nvim_create_buf(false, true)
-		pcall(vim.api.nvim_buf_set_name, output_buf, 'gtestrunner output')
-		vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = output_buf, nowait = true, silent = true })
-	end
-	local lines = vim.deepcopy(runner.output)
-	if build_state ~= nil then
-		table.insert(lines, 'Building...')
-	elseif runner.is_running() then
-		table.insert(lines, 'Running...')
-	elseif #lines == 0 then
-		lines = { 'No tests have been run yet' }
-	end
-	vim.bo[output_buf].modifiable = true
-	vim.api.nvim_buf_set_lines(output_buf, 0, -1, false, lines)
-	vim.bo[output_buf].modifiable = false
-
-	local win = vim.fn.bufwinid(output_buf)
-	if win == -1 then
-		vim.cmd('botright split')
-		win = vim.api.nvim_get_current_win()
-		vim.api.nvim_win_set_buf(win, output_buf)
-		vim.api.nvim_win_set_height(win, 15)
-	end
-	vim.api.nvim_win_set_cursor(win, { #lines, 0 })
-end
+-- Shows the live output of the latest build and run without the debugger in a split
+M.show_output = output.show
 
 local set_executable = function(path)
 	print(path)

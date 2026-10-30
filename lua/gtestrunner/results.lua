@@ -1,6 +1,7 @@
 local M = {}
 
--- test id -> { status = 'running'|'passed'|'failed'|'skipped', time_ms, failures = { string } }
+-- test id -> { status = 'building'|'running'|'passed'|'failed'|'skipped', time_ms, failures = { string },
+-- build_id } where build_id identifies the build of the executable the test was run with.
 -- Tests without an entry have status 'unknown' (not run).
 local by_id = {}
 
@@ -23,6 +24,23 @@ end
 M.status = function(id)
 	local result = by_id[id]
 	return result and result.status or 'unknown'
+end
+
+local finished = { passed = true, failed = true, skipped = true }
+
+-- True when the test has a result from another build than `current_build_id`
+M.is_stale = function(id, current_build_id)
+	local result = by_id[id]
+	return result ~= nil and finished[result.status] == true and result.build_id ~= current_build_id
+end
+
+-- Identifies the current build of an executable by its path and modification time
+M.build_id = function(executable)
+	local stat = executable and vim.uv.fs_stat(executable)
+	if stat == nil then
+		return nil
+	end
+	return vim.fn.fnamemodify(executable, ':p'):lower() .. '@' .. stat.mtime.sec .. '.' .. stat.mtime.nsec
 end
 
 M.clear = function()
@@ -87,7 +105,7 @@ end
 -- Updates results from a gtest json report (--gtest_output=json:<path>).
 -- `ids` are the tests that were requested; ones missing from the report get
 -- `missing.status` (default 'failed') with `missing.message`.
-M.finish = function(ids, report_path, missing)
+M.finish = function(ids, report_path, missing, build_id)
 	missing = missing or {}
 	local report = read_report(report_path)
 	os.remove(report_path)
@@ -103,7 +121,7 @@ M.finish = function(ids, report_path, missing)
 				elseif case.result == 'SKIPPED' then
 					status = 'skipped'
 				end
-				local result = found[id] or { time_ms = 0, failures = {} }
+				local result = found[id] or { time_ms = 0, failures = {}, build_id = build_id }
 				result.status = result.status and M.combine({ result.status, status }) or status
 				result.time_ms = result.time_ms + parse_ms(case.time)
 				for _, failure in ipairs(type(case.failures) == 'table' and case.failures or {}) do
@@ -126,7 +144,7 @@ M.finish = function(ids, report_path, missing)
 				if message == nil then
 					message = report and 'Test was not found in the executable' or 'No test report was written'
 				end
-				by_id[id] = { status = missing.status or 'failed', failures = { message } }
+				by_id[id] = { status = missing.status or 'failed', failures = { message }, build_id = build_id }
 			end
 		end
 	end

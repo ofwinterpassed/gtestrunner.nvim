@@ -1,6 +1,7 @@
 local results = require('gtestrunner.results')
 local discover = require('gtestrunner.discover')
 local marks = require('gtestrunner.marks')
+local output = require('gtestrunner.output')
 
 local M = {}
 
@@ -8,6 +9,8 @@ local ns = vim.api.nvim_create_namespace('gtestrunner_panel')
 
 local buf = nil
 local win = nil
+-- window below the panel showing the build output
+local output_win = nil
 -- buffer whose tests are shown
 local source = nil
 -- panel line (1-based) -> { suite = suite } or { test = test }
@@ -126,40 +129,53 @@ M.render = function()
 	local executable = source and config.executable_for(source) or config.current_executable
 	add_line(lines, highlights, vim.fn.fnamemodify(executable or '', ':t'), nil, { { 0, -1, 'Comment' } })
 	add_line(lines, highlights, 'r/d run/debug  R/D all  o output  x cancel', nil, { { 0, -1, 'Comment' } })
+	local status_text = output.status_text()
+	if status_text then
+		local phase_icon = icons[output.phase]
+		add_line(lines, highlights, phase_icon .. ' ' .. status_text, nil,
+			{ { 0, -1, marks.highlights[output.phase] } })
+	end
 	add_line(lines, highlights, '')
 
+	local build_id = results.build_id(executable)
+	local stale_suffix = ' · ' .. marks.stale_text
 	local tests = source and config.tests_for(source) or {}
 	if #tests == 0 then
 		add_line(lines, highlights, 'No tests found', nil, { { 0, -1, 'Comment' } })
 	end
 	for _, suite in ipairs(discover.suites(tests)) do
-		local statuses, passed = {}, 0
+		local statuses, passed, any_stale = {}, 0, false
 		for _, test in ipairs(suite.tests) do
 			local status = results.status(test.id)
 			table.insert(statuses, status)
 			if status == 'passed' then
 				passed = passed + 1
 			end
+			any_stale = any_stale or results.is_stale(test.id, build_id)
 		end
 		local status = results.combine(statuses)
 		local icon = icons[status]
-		add_line(lines, highlights, icon .. ' ' .. suite.name .. '  ' .. passed .. '/' .. #suite.tests,
-			{ suite = suite }, {
-				{ 0, #icon, marks.highlights[status] },
-				{ #icon + 1, #icon + 1 + #suite.name, 'GtestrunnerSuite' },
-				{ #icon + 1 + #suite.name, -1, 'Comment' },
-			})
+		local suite_text = icon .. ' ' .. suite.name .. '  ' .. passed .. '/' .. #suite.tests
+		local suite_line = suite_text .. (any_stale and stale_suffix or '')
+		add_line(lines, highlights, suite_line, { suite = suite }, {
+			{ 0, #icon, marks.highlights[status] },
+			{ #icon + 1, #icon + 1 + #suite.name, 'GtestrunnerSuite' },
+			{ #icon + 1 + #suite.name, #suite_text, 'Comment' },
+			{ #suite_text, -1, 'GtestrunnerStale' },
+		})
 
 		for _, test in ipairs(suite.tests) do
 			local result = results.get(test.id)
 			local test_status = result and result.status or 'unknown'
-			local test_icon = icons[test_status]
+			local stale = results.is_stale(test.id, build_id)
+			local test_icon = icons[test_status] .. (stale and icons.stale or '')
 			local prefix = '  ' .. test_icon .. ' ' .. test.name
 			local time = result and result.time_ms and (test_status == 'passed' or test_status == 'failed')
 				and ('  ' .. result.time_ms .. ' ms') or ''
-			add_line(lines, highlights, prefix .. time, { test = test }, {
+			add_line(lines, highlights, prefix .. time .. (stale and stale_suffix or ''), { test = test }, {
 				{ 2, 2 + #test_icon, marks.highlights[test_status] },
-				{ #prefix, -1, 'Comment' },
+				{ #prefix, #prefix + #time, 'Comment' },
+				{ #prefix + #time, -1, 'GtestrunnerStale' },
 			})
 			if test_status == 'failed' then
 				local shown = 0
@@ -217,8 +233,38 @@ M.open = function()
 	M.render()
 end
 
+-- Shows the build output in the lower half of the panel
+M.show_output = function()
+	if not M.is_open() or (output_win ~= nil and vim.api.nvim_win_is_valid(output_win)) then
+		return
+	end
+	output_win = vim.api.nvim_open_win(output.buf(), false, {
+		split = 'below',
+		win = win,
+		height = math.floor(vim.api.nvim_win_get_height(win) / 2),
+	})
+	local wo = vim.wo[output_win]
+	wo.number = false
+	wo.relativenumber = false
+	wo.signcolumn = 'no'
+	wo.foldcolumn = '0'
+	wo.spell = false
+	wo.list = false
+	wo.wrap = false
+	wo.winfixwidth = true
+	vim.api.nvim_win_set_cursor(output_win, { vim.api.nvim_buf_line_count(output.buf()), 0 })
+end
+
+M.hide_output = function()
+	if output_win ~= nil and vim.api.nvim_win_is_valid(output_win) then
+		pcall(vim.api.nvim_win_close, output_win, true)
+	end
+	output_win = nil
+end
+
 M.close = function()
 	M.closed_by_user = true
+	M.hide_output()
 	if M.is_open() then
 		local ok = pcall(vim.api.nvim_win_close, win, true)
 		if not ok then
@@ -241,6 +287,7 @@ M.on_win_closed = function(closed_win)
 	if closed_win == win then
 		win = nil
 		M.closed_by_user = true
+		M.hide_output()
 	end
 end
 
@@ -251,14 +298,16 @@ M.close_if_last = function()
 	end
 	local current = vim.api.nvim_get_current_win()
 	for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-		if w ~= win and w ~= current and vim.api.nvim_win_get_config(w).relative == '' then
+		if w ~= win and w ~= output_win and w ~= current and vim.api.nvim_win_get_config(w).relative == '' then
 			return
 		end
 	end
-	if current ~= win and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage() then
+	if current ~= win and current ~= output_win
+		and vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage() then
 		-- cleared first so WinClosed doesn't count it as closed by the user, :q can still fail
 		local panel_win = win
 		win = nil
+		M.hide_output()
 		vim.api.nvim_win_close(panel_win, true)
 	end
 end

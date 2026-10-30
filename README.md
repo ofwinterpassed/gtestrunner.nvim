@@ -8,7 +8,12 @@ When a C++ file with tests (`TEST`, `TEST_F` and `TEST_P`) is opened it shows:
 - a line above every test with its status, e.g. `✓ MySuite.MyTest passed · 3 ms`
 
 The status is read from the json report of google test (`--gtest_output=json`), both when running with and
-without the debugger.
+without the debugger. Tests whose result is from an older build of the executable are marked with `*` and
+`older build`.
+
+While the executable is built (see `build` below) the panel shows the progress, e.g.
+`◌ Building · 27% [123/456] · 1m 23s`, and the build output in its lower half. The output stays when the build
+fails.
 
 ## Install
 
@@ -42,6 +47,7 @@ without the debugger.
 			auto_open = true, -- open the panel when entering a file with tests
 			width = 50,
 			max_failure_lines = 10, -- failure message lines shown per test
+			show_build_output = true, -- show the build output in the lower half while building
 		},
 		signs = true,
 		virtual_lines = true,
@@ -58,6 +64,7 @@ without the debugger.
 			passed = '✓',
 			failed = '✗',
 			skipped = '⊘',
+			stale = '*', -- added to the icon of results from an older build
 		},
 	},
 }
@@ -111,7 +118,7 @@ The picked executable is used for all tests, also when `resolve_executable` is s
 | `run_suite()` / `debug_suite()` | Run / debug the suite of the test the cursor is in |
 | `run_file()` / `debug_file()` | Run / debug all tests in the current file |
 | `cancel()` | Stop the build or the run without the debugger |
-| `show_output()` | Show the output of the latest build and run without the debugger |
+| `show_output()` | Show the live output of the latest build and run without the debugger |
 | `clear_results()` | Reset all tests to not run |
 
 `run_gtest_under_cursor()` and `run_gtestsuite_under_cursor()` still work and are the same as `debug_test()` and `debug_suite()`.
@@ -138,5 +145,5 @@ Keys in the panel:
 ### Highlights
 
 `GtestrunnerUnknown`, `GtestrunnerBuilding`, `GtestrunnerRunning`, `GtestrunnerPassed`, `GtestrunnerFailed`, `GtestrunnerSkipped`,
-`GtestrunnerTitle`, `GtestrunnerSuite` and `GtestrunnerFailureText` can be overridden, they link to `Comment`,
+`GtestrunnerTitle`, `GtestrunnerSuite`, `GtestrunnerFailureText` and `GtestrunnerStale` can be overridden, they link to `Comment`,
 `Diagnostic*` and `Title` highlights by default.
