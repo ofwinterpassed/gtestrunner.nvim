@@ -41,6 +41,15 @@ M.default_executable = 'a.out'
 
 M.current_executable = M.bin_path .. '/' .. M.default_executable
 
+local run_gtest = function(param)
+	local config = vim.deepcopy(M.base_dap_config)
+	config.name = config.type .. ' ' .. M.current_executable .. ' ' .. param
+	config.program = M.current_executable
+	config.args = { param }
+	print(config.program .. ' ' .. param)
+	require('dap').run(config)
+end
+
 M.run_gtest_under_cursor = function()
 	local language_tree = vim.treesitter.get_parser()
 	local syntax_tree = language_tree:parse()[1]
@@ -62,12 +71,7 @@ M.run_gtest_under_cursor = function()
 				for _, node in ipairs(captures[3]) do
 					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
 				end
-				local config = M.base_dap_config
-				config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
-				config.program = M.current_executable
-				config.args = { param }
-				print(config.program .. ' ' .. param)
-				require('dap').run(config)
+				run_gtest(param)
 				return
 			end
 		end
@@ -93,12 +97,7 @@ M.run_gtestsuite_under_cursor = function()
 				for _, node in ipairs(captures[2]) do
 					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
 				end
-				local config = M.base_dap_config
-				config.name = config.type .. ' ' .. config.MIMode .. ' ' .. M.current_executable .. ' ' .. param
-				config.program = M.current_executable
-				config.args = { param }
-				print(config.program .. ' ' .. param)
-				require('dap').run(config)
+				run_gtest(param)
 				return
 			end
 		end
