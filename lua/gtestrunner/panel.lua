@@ -72,15 +72,15 @@ local run_item = function(debug)
 		return
 	end
 	if item.test then
-		gtestrunner().run_tests({ item.test }, debug)
+		gtestrunner().run_tests({ item.test }, debug, source)
 	else
-		gtestrunner().run_suite_tests(item.suite.name, item.suite.tests, debug)
+		gtestrunner().run_suite_tests(item.suite.name, item.suite.tests, debug, source)
 	end
 end
 
 local run_all = function(debug)
 	if source ~= nil then
-		gtestrunner().run_tests(gtestrunner().tests_for(source), debug)
+		gtestrunner().run_tests(gtestrunner().tests_for(source), debug, source)
 	end
 end
 
@@ -123,8 +123,8 @@ M.render = function()
 	local source_name = source and vim.api.nvim_buf_is_valid(source) and vim.api.nvim_buf_get_name(source) or ''
 	local title = source_name ~= '' and vim.fn.fnamemodify(source_name, ':t') or '[No test file]'
 	add_line(lines, highlights, title, nil, { { 0, -1, 'GtestrunnerTitle' } })
-	add_line(lines, highlights, vim.fn.fnamemodify(config.current_executable or '', ':t'), nil,
-		{ { 0, -1, 'Comment' } })
+	local executable = source and config.executable_for(source) or config.current_executable
+	add_line(lines, highlights, vim.fn.fnamemodify(executable or '', ':t'), nil, { { 0, -1, 'Comment' } })
 	add_line(lines, highlights, 'r/d run/debug  R/D all  o output  x cancel', nil, { { 0, -1, 'Comment' } })
 	add_line(lines, highlights, '')
 

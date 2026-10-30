@@ -35,8 +35,21 @@ M.signs = true
 
 M.virtual_lines = true
 
+-- function(buf) returning the test executable for the tests in a buffer, or nil to use
+-- current_executable
+M.resolve_executable = nil
+
+-- function(request, done) that builds the test executable before the tests are run, with
+-- request = { executable, buf, output = function(lines) }. It must call done(ok) when finished
+-- and can return a function that cancels the build.
+M.build = nil
+
+-- write modified buffers before building
+M.save_before_build = true
+
 M.icons = {
 	unknown = '○',
+	building = '◌',
 	running = '●',
 	passed = '✓',
 	failed = '✗',
@@ -49,6 +62,25 @@ local nested_options = { panel = true, icons = true }
 -- attached buffer -> { tests }
 local buffers = {}
 local refresh_ticks = {}
+
+-- executable picked with set_debug_executable, used instead of resolve_executable
+local executable_override = nil
+
+-- build in progress: { ids, cancel = function or nil }
+local build_state = nil
+
+M.executable_for = function(buf)
+	if executable_override then
+		return executable_override
+	end
+	if M.resolve_executable and buf and vim.api.nvim_buf_is_valid(buf) then
+		local executable = M.resolve_executable(buf)
+		if executable then
+			return executable
+		end
+	end
+	return M.current_executable
+end
 
 M.tests_for = function(buf)
 	local state = buffers[buf]
@@ -127,6 +159,7 @@ end
 local define_highlights = function()
 	local links = {
 		GtestrunnerUnknown = 'Comment',
+		GtestrunnerBuilding = 'DiagnosticHint',
 		GtestrunnerRunning = 'DiagnosticWarn',
 		GtestrunnerPassed = 'DiagnosticOk',
 		GtestrunnerFailed = 'DiagnosticError',
@@ -198,15 +231,16 @@ local resolve_cwd = function()
 	return (cwd:gsub('%${workspaceFolder}', function() return vim.fn.getcwd() end))
 end
 
-local start = function(filter, ids, debug)
-	if vim.uv.fs_stat(M.current_executable) == nil then
-		vim.notify('gtestrunner: test executable not found: ' .. M.current_executable ..
+local launch = function(executable, filter, ids, debug)
+	if vim.uv.fs_stat(executable) == nil then
+		results.set_status(ids, 'unknown')
+		vim.notify('gtestrunner: test executable not found: ' .. executable ..
 			'\nPick one with set_debug_executable()', vim.log.levels.ERROR)
 		return
 	end
 	local request = {
 		-- absolute, the tests may run in another directory than the current one
-		executable = vim.fn.fnamemodify(M.current_executable, ':p'),
+		executable = vim.fn.fnamemodify(executable, ':p'),
 		filter = filter,
 		ids = ids,
 	}
@@ -219,7 +253,53 @@ local start = function(filter, ids, debug)
 	end
 end
 
-M.run_tests = function(tests, debug)
+local start = function(filter, ids, debug, buf)
+	if runner.is_running() or build_state ~= nil then
+		vim.notify('gtestrunner: tests are already running', vim.log.levels.WARN)
+		return
+	end
+	local executable = M.executable_for(buf)
+	runner.output = {}
+	if M.build == nil then
+		launch(executable, filter, ids, debug)
+		return
+	end
+
+	if M.save_before_build then
+		vim.cmd('silent! wall')
+	end
+	results.set_status(ids, 'building')
+	local state = { ids = ids }
+	build_state = state
+	local request = {
+		executable = executable,
+		buf = buf,
+		output = function(lines)
+			vim.list_extend(runner.output, lines)
+		end,
+	}
+	local cancel = M.build(request, function(ok)
+		vim.schedule(function()
+			-- cancelled, or replaced by a newer build
+			if build_state ~= state then
+				return
+			end
+			build_state = nil
+			if ok then
+				-- resolved again, the build can create or move the executable
+				launch(M.executable_for(buf), filter, ids, debug)
+			else
+				results.set_status(ids, 'unknown')
+				vim.notify('gtestrunner: building the tests failed, see show_output()', vim.log.levels.ERROR)
+			end
+		end)
+	end)
+	if type(cancel) == 'function' then
+		state.cancel = cancel
+	end
+end
+
+M.run_tests = function(tests, debug, buf)
 	if #tests == 0 then
 		vim.notify('gtestrunner: no tests to run', vim.log.levels.WARN)
 		return
@@ -229,16 +309,16 @@ M.run_tests = function(tests, debug)
 		table.insert(filters, test_filter(test))
 		table.insert(ids, test.id)
 	end
-	start(table.concat(filters, ':'), ids, debug)
+	start(table.concat(filters, ':'), ids, debug, buf or vim.api.nvim_get_current_buf())
 end
 
 -- Runs the whole suite, `tests` are the tests of the suite that are shown as running
-M.run_suite_tests = function(suite, tests, debug)
+M.run_suite_tests = function(suite, tests, debug, buf)
 	local ids = {}
 	for _, test in ipairs(tests) do
 		table.insert(ids, test.id)
 	end
-	start(suite_filter(suite), ids, debug)
+	start(suite_filter(suite), ids, debug, buf or vim.api.nvim_get_current_buf())
 end
 
 local test_under_cursor = function()
@@ -277,7 +357,20 @@ M.debug_file = function() M.run_tests(M.tests_for(vim.api.nvim_get_current_buf()
 M.run_gtest_under_cursor = M.debug_test
 M.run_gtestsuite_under_cursor = M.debug_suite
 
-M.cancel = runner.cancel
+-- Cancels the build or the run without the debugger
+M.cancel = function()
+	local state = build_state
+	if state ~= nil then
+		build_state = nil
+		if state.cancel then
+			state.cancel()
+		end
+		table.insert(runner.output, 'Build cancelled')
+		results.set_status(state.ids, 'unknown')
+	end
+	runner.cancel()
+end
+
 M.clear_results = results.clear
 M.open_panel = panel.open
 M.close_panel = panel.close
@@ -293,10 +386,12 @@ M.show_output = function()
 		vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = output_buf, nowait = true, silent = true })
 	end
 	local lines = vim.deepcopy(runner.output)
-	if #lines == 0 then
-		lines = { 'No tests have been run yet' }
+	if build_state ~= nil then
+		table.insert(lines, 'Building...')
 	elseif runner.is_running() then
 		table.insert(lines, 'Running...')
+	elseif #lines == 0 then
+		lines = { 'No tests have been run yet' }
 	end
 	vim.bo[output_buf].modifiable = true
 	vim.api.nvim_buf_set_lines(output_buf, 0, -1, false, lines)
@@ -315,7 +410,15 @@ end
 local set_executable = function(path)
 	print(path)
 	M.current_executable = M.bin_path .. '/' .. path
+	-- a picked executable is used for all tests, also when resolve_executable is set
+	executable_override = M.current_executable
 	-- results belong to the previous executable
+	results.clear()
+end
+
+-- Stops using the executable picked with set_debug_executable
+M.reset_executable = function()
+	executable_override = nil
 	results.clear()
 end
 

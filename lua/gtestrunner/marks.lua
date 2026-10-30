@@ -6,6 +6,7 @@ local ns = vim.api.nvim_create_namespace('gtestrunner')
 
 M.highlights = {
 	unknown = 'GtestrunnerUnknown',
+	building = 'GtestrunnerBuilding',
 	running = 'GtestrunnerRunning',
 	passed = 'GtestrunnerPassed',
 	failed = 'GtestrunnerFailed',
@@ -14,6 +15,7 @@ M.highlights = {
 
 local labels = {
 	unknown = 'not run',
+	building = 'building',
 	running = 'running',
 	passed = 'passed',
 	failed = 'failed',

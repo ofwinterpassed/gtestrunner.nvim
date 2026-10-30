@@ -2,7 +2,7 @@ local results = require('gtestrunner.results')
 
 local M = {}
 
--- Output of the latest run without the debugger
+-- Output of the latest build and run without the debugger
 M.output = {}
 
 local job = nil
@@ -41,7 +41,7 @@ M.run = function(request)
 	end
 	local report = report_path()
 	local cmd = { request.executable, '--gtest_filter=' .. request.filter, '--gtest_output=json:' .. report }
-	M.output = { '$ ' .. table.concat(cmd, ' '), '' }
+	vim.list_extend(M.output, { '$ ' .. table.concat(cmd, ' '), '' })
 	cancelled = false
 	results.set_running(request.ids)
 

@@ -30,16 +30,20 @@ M.clear = function()
 	changed()
 end
 
-M.set_running = function(ids)
+M.set_status = function(ids, status)
 	for _, id in ipairs(ids) do
-		by_id[id] = { status = 'running', failures = {} }
+		by_id[id] = status ~= 'unknown' and { status = status, failures = {} } or nil
 	end
 	changed()
 end
 
+M.set_running = function(ids)
+	M.set_status(ids, 'running')
+end
+
 -- Precedence used when combining several results, e.g. the instances of a TEST_P
 -- or the tests of a suite.
-local precedence = { failed = 5, running = 4, unknown = 3, passed = 2, skipped = 1 }
+local precedence = { failed = 6, running = 5, building = 4, unknown = 3, passed = 2, skipped = 1 }
 
 M.combine = function(statuses)
 	local combined

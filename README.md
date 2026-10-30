@@ -45,8 +45,15 @@ without the debugger.
 		},
 		signs = true,
 		virtual_lines = true,
+		-- function(buf) returning the test executable for the tests in a buffer, nil uses the
+		-- executable picked with set_debug_executable or default_executable
+		resolve_executable = nil,
+		-- function(request, done) building the executable before running tests, see below
+		build = nil,
+		save_before_build = true, -- write modified buffers before building
 		icons = {
 			unknown = '○',
+			building = '◌',
 			running = '●',
 			passed = '✓',
 			failed = '✗',
@@ -57,6 +64,28 @@ without the debugger.
 ```
 
 `panel` and `icons` are merged with the defaults, the other options replace them.
+
+### Choosing and building the executable
+
+The executable for a buffer is, in order:
+
+1. the one picked with `set_debug_executable()`, until `reset_executable()` is called
+2. the one returned by `resolve_executable(buf)`
+3. `bin_path/default_executable`
+
+When `build` is set it is called before every run, and the tests are run when it calls `done(true)`:
+
+```lua
+build = function(request, done)
+	-- request.executable: the executable that will be run
+	-- request.buf: the buffer the tests are in
+	-- request.output(lines): add lines to the output shown by show_output()
+	vim.system({ 'make', 'tests' }, {}, function(res) done(res.code == 0) end)
+	-- optionally return a function that cancels the build, called by cancel()
+end
+```
+
+The executable is resolved again after the build, so `resolve_executable` can return a path that the build creates.
 
 ## Exposed functions
 
@@ -72,6 +101,8 @@ Opens a file picker for executables in `gtestrunner.bin_path` and selects it as 
 
 Only the selected picker needs to be installed. All of them use `fd` to find the executables. Changing the executable clears the test results.
 
+The picked executable is used for all tests, also when `resolve_executable` is set. `require('gtestrunner').reset_executable()` goes back to the resolved one.
+
 ### Running tests
 
 | Function | Description |
@@ -79,8 +110,8 @@ Only the selected picker needs to be installed. All of them use `fd` to find the
 | `run_test()` / `debug_test()` | Run / debug the test the cursor is in |
 | `run_suite()` / `debug_suite()` | Run / debug the suite of the test the cursor is in |
 | `run_file()` / `debug_file()` | Run / debug all tests in the current file |
-| `cancel()` | Stop the run without the debugger |
-| `show_output()` | Show the output of the latest run without the debugger |
+| `cancel()` | Stop the build or the run without the debugger |
+| `show_output()` | Show the output of the latest build and run without the debugger |
 | `clear_results()` | Reset all tests to not run |
 
 `run_gtest_under_cursor()` and `run_gtestsuite_under_cursor()` still work and are the same as `debug_test()` and `debug_suite()`.
@@ -106,6 +137,6 @@ Keys in the panel:
 
 ### Highlights
 
-`GtestrunnerUnknown`, `GtestrunnerRunning`, `GtestrunnerPassed`, `GtestrunnerFailed`, `GtestrunnerSkipped`,
+`GtestrunnerUnknown`, `GtestrunnerBuilding`, `GtestrunnerRunning`, `GtestrunnerPassed`, `GtestrunnerFailed`, `GtestrunnerSkipped`,
 `GtestrunnerTitle`, `GtestrunnerSuite` and `GtestrunnerFailureText` can be overridden, they link to `Comment`,
 `Diagnostic*` and `Title` highlights by default.
