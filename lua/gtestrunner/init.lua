@@ -1,27 +1,10 @@
+local discover = require('gtestrunner.discover')
+local results = require('gtestrunner.results')
+local runner = require('gtestrunner.runner')
+local marks = require('gtestrunner.marks')
+local panel = require('gtestrunner.panel')
+
 local M = {}
-
-M.setup = function(opts)
-	for key, value in pairs(opts or {}) do
-		M[key] = value
-	end
-	M.current_executable = M.bin_path .. '/' .. M.default_executable
-end
-
-local gtestfuncquery = [[
-(function_definition
-		declarator: (function_declarator
-				declarator: (identifier) @gtestfunc (#match? @gtestfunc "^TEST(_[PF])?$")
-				parameters: (parameter_list
-						.
-						(parameter_declaration
-								type: (type_identifier) @gtestsuite)
-						.
-						(parameter_declaration
-								type: (type_identifier) @gtestname)
-				)
-		)
-) @gtest
-]]
 
 M.base_dap_config = {
 	type = 'cppdbg',
@@ -41,73 +24,299 @@ M.default_executable = 'a.out'
 
 M.current_executable = M.bin_path .. '/' .. M.default_executable
 
-local run_gtest = function(param)
-	local config = vim.deepcopy(M.base_dap_config)
-	config.name = config.type .. ' ' .. M.current_executable .. ' ' .. param
-	config.program = M.current_executable
-	config.args = { param }
-	print(config.program .. ' ' .. param)
-	require('dap').run(config)
+M.panel = {
+	-- open the panel when entering a file with tests
+	auto_open = true,
+	width = 50,
+	max_failure_lines = 10,
+}
+
+M.signs = true
+
+M.virtual_lines = true
+
+M.icons = {
+	unknown = '○',
+	running = '●',
+	passed = '✓',
+	failed = '✗',
+	skipped = '⊘',
+}
+
+-- options that are merged with the defaults instead of replacing them
+local nested_options = { panel = true, icons = true }
+
+-- attached buffer -> { tests }
+local buffers = {}
+local refresh_ticks = {}
+
+M.tests_for = function(buf)
+	local state = buffers[buf]
+	return state and state.tests or {}
 end
 
-M.run_gtest_under_cursor = function()
-	local language_tree = vim.treesitter.get_parser()
-	local syntax_tree = language_tree:parse()[1]
-	local lang = language_tree:lang()
-	local root = syntax_tree:root()
-
-	local query = vim.treesitter.query.parse(lang, gtestfuncquery)
-
-	local buf = vim.api.nvim_get_current_buf()
-	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
-
-	for _, captures, _, _ in query:iter_matches(root, buf, root:start(), root:end_(), {all=true}) do
-		for _, tfnode in ipairs(captures[4]) do
-			if vim.treesitter.is_in_node_range(tfnode, row - 1, col) then
-				local param = '--gtest_filter=*'
-				for _, node in ipairs(captures[2]) do
-					param = param .. vim.treesitter.get_node_text(node, buf) .. '.'
-				end
-				for _, node in ipairs(captures[3]) do
-					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
-				end
-				run_gtest(param)
-				return
-			end
-		end
+local render_all = function()
+	for buf, state in pairs(buffers) do
+		marks.render(buf, state.tests, M)
 	end
-	--print('Not in a test')
+	panel.render()
 end
 
-M.run_gtestsuite_under_cursor = function()
-	local language_tree = vim.treesitter.get_parser()
-	local syntax_tree = language_tree:parse()[1]
-	local lang = language_tree:lang()
-	local root = syntax_tree:root()
+results.on_change(render_all)
 
-	local query = vim.treesitter.query.parse(lang, gtestfuncquery)
+local on_enter = function(buf)
+	if #M.tests_for(buf) == 0 then
+		return
+	end
+	if panel.source() ~= buf then
+		panel.set_source(buf)
+	end
+	if M.panel.auto_open and not panel.is_open() and not panel.closed_by_user then
+		panel.open()
+	end
+end
 
-	local buf = vim.api.nvim_get_current_buf()
-	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+local refresh = function(buf)
+	local state = buffers[buf]
+	if state == nil or not vim.api.nvim_buf_is_valid(buf) then
+		return
+	end
+	state.tests = discover.tests(buf)
+	marks.render(buf, state.tests, M)
+	if panel.source() == buf then
+		panel.render()
+	end
+end
 
-	for _, captures, _, _ in query:iter_matches(root, buf, root:start(), root:end_(), {all=true}) do
-		for _, tfnode in ipairs(captures[4]) do
-			if vim.treesitter.is_in_node_range(tfnode, row - 1, col) then
-				local param = '--gtest_filter=*'
-				for _, node in ipairs(captures[2]) do
-					param = param .. vim.treesitter.get_node_text(node, buf) .. '*'
-				end
-				run_gtest(param)
-				return
-			end
+local schedule_refresh = function(buf)
+	local tick = (refresh_ticks[buf] or 0) + 1
+	refresh_ticks[buf] = tick
+	vim.defer_fn(function()
+		if refresh_ticks[buf] == tick then
+			refresh(buf)
+		end
+	end, 200)
+end
+
+local attach = function(buf, group)
+	if buffers[buf] ~= nil then
+		-- reloaded, e.g. :e after :bd which drops the marks
+		refresh(buf)
+		return
+	end
+	buffers[buf] = { tests = {} }
+	vim.api.nvim_create_autocmd({ 'TextChanged', 'InsertLeave', 'BufWritePost' }, {
+		group = group,
+		buffer = buf,
+		callback = function() schedule_refresh(buf) end,
+	})
+	vim.api.nvim_create_autocmd('BufWipeout', {
+		group = group,
+		buffer = buf,
+		callback = function()
+			buffers[buf] = nil
+			refresh_ticks[buf] = nil
+		end,
+	})
+	refresh(buf)
+	if buf == vim.api.nvim_get_current_buf() then
+		on_enter(buf)
+	end
+end
+
+local define_highlights = function()
+	local links = {
+		GtestrunnerUnknown = 'Comment',
+		GtestrunnerRunning = 'DiagnosticWarn',
+		GtestrunnerPassed = 'DiagnosticOk',
+		GtestrunnerFailed = 'DiagnosticError',
+		GtestrunnerSkipped = 'DiagnosticInfo',
+		GtestrunnerTitle = 'Title',
+		GtestrunnerSuite = 'Identifier',
+		GtestrunnerFailureText = 'DiagnosticVirtualTextError',
+	}
+	for group, link in pairs(links) do
+		vim.api.nvim_set_hl(0, group, { link = link, default = true })
+	end
+end
+
+M.setup = function(opts)
+	for key, value in pairs(opts or {}) do
+		if nested_options[key] and type(value) == 'table' then
+			M[key] = vim.tbl_deep_extend('force', M[key], value)
+		else
+			M[key] = value
 		end
 	end
-	print('Not in a test')
+	M.current_executable = M.bin_path .. '/' .. M.default_executable
+
+	define_highlights()
+
+	local group = vim.api.nvim_create_augroup('gtestrunner', { clear = true })
+	buffers = {}
+	vim.api.nvim_create_autocmd('FileType', {
+		group = group,
+		pattern = 'cpp',
+		callback = function(args) attach(args.buf, group) end,
+	})
+	vim.api.nvim_create_autocmd('BufEnter', {
+		group = group,
+		callback = function(args) on_enter(args.buf) end,
+	})
+	vim.api.nvim_create_autocmd('WinClosed', {
+		group = group,
+		callback = function(args) panel.on_win_closed(tonumber(args.match)) end,
+	})
+	vim.api.nvim_create_autocmd('QuitPre', {
+		group = group,
+		callback = function() panel.close_if_last() end,
+	})
+	vim.api.nvim_create_autocmd('ColorScheme', {
+		group = group,
+		callback = define_highlights,
+	})
+
+	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+		if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].filetype == 'cpp' then
+			attach(buf, group)
+		end
+	end
+end
+
+-- Matches the test and its parameterized instances, e.g. Instance/Suite.Name/0
+local test_filter = function(test)
+	local id = test.id
+	return table.concat({ id, id .. '/*', '*/' .. id, '*/' .. id .. '/*' }, ':')
+end
+
+local suite_filter = function(suite)
+	return suite .. '.*:*/' .. suite .. '.*'
+end
+
+local resolve_cwd = function()
+	local cwd = M.base_dap_config.cwd or '${workspaceFolder}'
+	return (cwd:gsub('%${workspaceFolder}', function() return vim.fn.getcwd() end))
+end
+
+local start = function(filter, ids, debug)
+	if vim.uv.fs_stat(M.current_executable) == nil then
+		vim.notify('gtestrunner: test executable not found: ' .. M.current_executable ..
+			'\nPick one with set_debug_executable()', vim.log.levels.ERROR)
+		return
+	end
+	local request = {
+		-- absolute, the tests may run in another directory than the current one
+		executable = vim.fn.fnamemodify(M.current_executable, ':p'),
+		filter = filter,
+		ids = ids,
+	}
+	if debug then
+		request.dap_config = M.base_dap_config
+		runner.debug(request)
+	else
+		request.cwd = resolve_cwd()
+		runner.run(request)
+	end
+end
+
+M.run_tests = function(tests, debug)
+	if #tests == 0 then
+		vim.notify('gtestrunner: no tests to run', vim.log.levels.WARN)
+		return
+	end
+	local filters, ids = {}, {}
+	for _, test in ipairs(tests) do
+		table.insert(filters, test_filter(test))
+		table.insert(ids, test.id)
+	end
+	start(table.concat(filters, ':'), ids, debug)
+end
+
+-- Runs the whole suite, `tests` are the tests of the suite that are shown as running
+M.run_suite_tests = function(suite, tests, debug)
+	local ids = {}
+	for _, test in ipairs(tests) do
+		table.insert(ids, test.id)
+	end
+	start(suite_filter(suite), ids, debug)
+end
+
+local test_under_cursor = function()
+	local buf = vim.api.nvim_get_current_buf()
+	local tests = M.tests_for(buf)
+	local test = discover.test_at_row(tests, vim.api.nvim_win_get_cursor(0)[1] - 1)
+	if test == nil then
+		vim.notify('gtestrunner: the cursor is not in a test', vim.log.levels.WARN)
+	end
+	return test, tests
+end
+
+local run_test_under_cursor = function(debug)
+	local test = test_under_cursor()
+	if test then
+		M.run_tests({ test }, debug)
+	end
+end
+
+local run_suite_under_cursor = function(debug)
+	local test, tests = test_under_cursor()
+	if test then
+		local suite_tests = vim.tbl_filter(function(t) return t.suite == test.suite end, tests)
+		M.run_suite_tests(test.suite, suite_tests, debug)
+	end
+end
+
+M.run_test = function() run_test_under_cursor(false) end
+M.debug_test = function() run_test_under_cursor(true) end
+M.run_suite = function() run_suite_under_cursor(false) end
+M.debug_suite = function() run_suite_under_cursor(true) end
+M.run_file = function() M.run_tests(M.tests_for(vim.api.nvim_get_current_buf()), false) end
+M.debug_file = function() M.run_tests(M.tests_for(vim.api.nvim_get_current_buf()), true) end
+
+-- Previous names of debug_test and debug_suite
+M.run_gtest_under_cursor = M.debug_test
+M.run_gtestsuite_under_cursor = M.debug_suite
+
+M.cancel = runner.cancel
+M.clear_results = results.clear
+M.open_panel = panel.open
+M.close_panel = panel.close
+M.toggle_panel = panel.toggle
+
+local output_buf = nil
+
+-- Shows the output of the latest run without the debugger in a split
+M.show_output = function()
+	if output_buf == nil or not vim.api.nvim_buf_is_valid(output_buf) then
+		output_buf = vim.api.nvim_create_buf(false, true)
+		pcall(vim.api.nvim_buf_set_name, output_buf, 'gtestrunner output')
+		vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = output_buf, nowait = true, silent = true })
+	end
+	local lines = vim.deepcopy(runner.output)
+	if #lines == 0 then
+		lines = { 'No tests have been run yet' }
+	elseif runner.is_running() then
+		table.insert(lines, 'Running...')
+	end
+	vim.bo[output_buf].modifiable = true
+	vim.api.nvim_buf_set_lines(output_buf, 0, -1, false, lines)
+	vim.bo[output_buf].modifiable = false
+
+	local win = vim.fn.bufwinid(output_buf)
+	if win == -1 then
+		vim.cmd('botright split')
+		win = vim.api.nvim_get_current_win()
+		vim.api.nvim_win_set_buf(win, output_buf)
+		vim.api.nvim_win_set_height(win, 15)
+	end
+	vim.api.nvim_win_set_cursor(win, { #lines, 0 })
 end
 
 local set_executable = function(path)
 	print(path)
 	M.current_executable = M.bin_path .. '/' .. path
+	-- results belong to the previous executable
+	results.clear()
 end
 
 local pickers = {}
